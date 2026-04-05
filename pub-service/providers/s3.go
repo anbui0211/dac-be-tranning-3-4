@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -121,4 +122,19 @@ func (p *S3Provider) GetClient() *s3.Client {
 
 func (p *S3Provider) GetBucket() string {
 	return p.bucket
+}
+
+func (p *S3Provider) UploadFile(ctx context.Context, key string, data []byte) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(p.bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	}
+
+	_, err := p.client.PutObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to upload file to S3: %w", err)
+	}
+
+	return nil
 }

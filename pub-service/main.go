@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"pub-service/pkg/handlers"
+	"pub-service/pkg/services"
 	"pub-service/providers"
 
 	"github.com/gin-gonic/gin"
@@ -42,46 +43,18 @@ func main() {
 		}
 	}
 
-	handler := handlers.NewHandler(s3Provider, sqsProvider, workerCount)
+	service := services.NewService(s3Provider, sqsProvider, workerCount)
+	log.Println("Service initialized")
+
+	handler := handlers.NewHandler(service)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "pub-service"})
-	})
-
-	router.POST("/batch", func(c *gin.Context) {
-		var request struct {
-			CSVFile string `json:"csv_file" binding:"required"`
-		}
-
-		if err := c.ShouldBindJSON(&request); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		log.Printf("Processing batch for file: %s", request.CSVFile)
-
-		if err := handler.ProcessBatch(ctx, request.CSVFile); err != nil {
-			log.Printf("Error processing batch: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Batch processing started"})
-	})
-
-	router.GET("/files", func(c *gin.Context) {
-		files, err := s3Provider.ListFiles(ctx)
-		if err != nil {
-			log.Printf("Error listing files: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"files": files})
-	})
+	router.GET("/health", handler.HealthHandler)
+	router.GET("/batch", handler.ProcessBatchHandler)
+	router.GET("/files", handler.ListFilesHandler)
+	router.GET("/upload", handler.UploadFileHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
