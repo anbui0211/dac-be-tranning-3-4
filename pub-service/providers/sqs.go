@@ -51,15 +51,11 @@ type Message struct {
 	MessageID string `json:"message_id"`
 	UserID    string `json:"user_id"`
 	Message   string `json:"message"`
-	Timestamp string `json:"timestamp"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Phone     string `json:"phone"`
 }
 
 func (p *SQSProvider) SendMessage(ctx context.Context, msg *Message) error {
-	messageBody := fmt.Sprintf(`{"message_id":"%s","user_id":"%s","message":"%s","timestamp":"%s","email":"%s","name":"%s","phone":"%s"}`,
-		msg.MessageID, msg.UserID, msg.Message, msg.Timestamp, msg.Email, msg.Name, msg.Phone)
+	messageBody := fmt.Sprintf(`{"message_id":"%s","user_id":"%s","message":"%s"}`,
+		msg.MessageID, msg.UserID, msg.Message)
 
 	input := &sqs.SendMessageInput{
 		QueueUrl:    aws.String(p.queueURL),
@@ -89,8 +85,8 @@ func (p *SQSProvider) BatchSendMessage(ctx context.Context, messages []*Message)
 		entries := make([]types.SendMessageBatchRequestEntry, 0, end-i)
 		for j := i; j < end; j++ {
 			msg := messages[j]
-			messageBody := fmt.Sprintf(`{"message_id":"%s","user_id":"%s","message":"%s","timestamp":"%s","email":"%s","name":"%s","phone":"%s"}`,
-				msg.MessageID, msg.UserID, msg.Message, msg.Timestamp, msg.Email, msg.Name, msg.Phone)
+			messageBody := fmt.Sprintf(`{"message_id":"%s","user_id":"%s","message":"%s"}`,
+				msg.MessageID, msg.UserID, msg.Message)
 
 			entry := types.SendMessageBatchRequestEntry{
 				Id:          aws.String(msg.MessageID),

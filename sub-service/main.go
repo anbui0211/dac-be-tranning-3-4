@@ -35,6 +35,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Redis provider: %v", err)
 	}
+
 	defer redisProvider.Close()
 	log.Println("Redis provider initialized")
 
@@ -216,8 +217,7 @@ func messageWorker(
 				continue
 			}
 
-			log.Printf("Worker %d: processing user %s - %s (%s - %s)",
-				workerID, message.UserID, message.Name, message.Email, message.Phone)
+			log.Printf("Worker %d: processing user %s", workerID, message.UserID)
 			log.Printf("Worker %d: message: %s", workerID, message.Message)
 
 			if err := redisProvider.MarkProcessed(ctx, message.MessageID, message.UserID); err != nil {

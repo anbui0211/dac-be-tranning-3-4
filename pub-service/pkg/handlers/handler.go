@@ -15,29 +15,21 @@ import (
 	"github.com/google/uuid"
 )
 
-type BatchHandler struct {
+type Handler struct {
 	s3Provider  *providers.S3Provider
 	sqsProvider *providers.SQSProvider
 	workerCount int
 }
 
-func NewBatchHandler(s3Provider *providers.S3Provider, sqsProvider *providers.SQSProvider, workerCount int) *BatchHandler {
-	return &BatchHandler{
+func NewHandler(s3Provider *providers.S3Provider, sqsProvider *providers.SQSProvider, workerCount int) *Handler {
+	return &Handler{
 		s3Provider:  s3Provider,
 		sqsProvider: sqsProvider,
 		workerCount: workerCount,
 	}
 }
 
-type CSVRow struct {
-	UserID  string
-	Email   string
-	Name    string
-	Phone   string
-	Message string
-}
-
-func (h *BatchHandler) ProcessBatch(ctx context.Context, csvKey string) error {
+func (h *Handler) ProcessBatch(ctx context.Context, csvKey string) error {
 	log.Printf("Starting batch processing for file: %s", csvKey)
 
 	startTime := time.Now()
@@ -68,6 +60,7 @@ func (h *BatchHandler) ProcessBatch(ctx context.Context, csvKey string) error {
 
 	rowChannel := make(chan []string, 1000)
 	messageChannel := make(chan *providers.Message, 100)
+	messageCount := make(chan int, h.workerCount)
 
 	var wg sync.WaitGroup
 
@@ -78,7 +71,7 @@ func (h *BatchHandler) ProcessBatch(ctx context.Context, csvKey string) error {
 
 	batchWG := sync.WaitGroup{}
 	batchWG.Add(1)
-	go h.batchWorker(ctx, messageChannel, &batchWG)
+	go h.batchWorker(ctx, messageChannel, messageCount, &batchWG)
 
 	for {
 		row, err := reader.Read()
@@ -104,6 +97,11 @@ func (h *BatchHandler) ProcessBatch(ctx context.Context, csvKey string) error {
 	wg.Wait()
 
 	close(messageChannel)
+
+	for count := range messageCount {
+		totalMessages += count
+	}
+
 	batchWG.Wait()
 
 	duration := time.Since(startTime)
@@ -116,28 +114,23 @@ func (h *BatchHandler) ProcessBatch(ctx context.Context, csvKey string) error {
 	return nil
 }
 
-func (h *BatchHandler) rowWorker(ctx context.Context, rowChannel <-chan []string, messageChannel chan<- *providers.Message, wg *sync.WaitGroup) {
+func (h *Handler) rowWorker(ctx context.Context, rowChannel <-chan []string, messageChannel chan<- *providers.Message, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for row := range rowChannel {
 		messageID := uuid.New().String()
-		timestamp := time.Now().Format(time.RFC3339)
 
 		msg := &providers.Message{
 			MessageID: messageID,
 			UserID:    row[0],
-			Email:     row[1],
-			Name:      row[2],
-			Phone:     row[3],
 			Message:   row[4],
-			Timestamp: timestamp,
 		}
 
 		messageChannel <- msg
 	}
 }
 
-func (h *BatchHandler) batchWorker(ctx context.Context, messageChannel <-chan *providers.Message, wg *sync.WaitGroup) {
+func (h *Handler) batchWorker(ctx context.Context, messageChannel <-chan *providers.Message, messageCount chan<- int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	batchSize := 10
@@ -149,6 +142,8 @@ func (h *BatchHandler) batchWorker(ctx context.Context, messageChannel <-chan *p
 		if len(batch) >= batchSize {
 			if err := h.sqsProvider.BatchSendMessage(ctx, batch); err != nil {
 				log.Printf("Error sending batch: %v", err)
+			} else {
+				messageCount <- len(batch)
 			}
 			batch = batch[:0]
 		}
@@ -157,6 +152,10 @@ func (h *BatchHandler) batchWorker(ctx context.Context, messageChannel <-chan *p
 	if len(batch) > 0 {
 		if err := h.sqsProvider.BatchSendMessage(ctx, batch); err != nil {
 			log.Printf("Error sending final batch: %v", err)
+		} else {
+			messageCount <- len(batch)
 		}
 	}
+
+	close(messageCount)
 }

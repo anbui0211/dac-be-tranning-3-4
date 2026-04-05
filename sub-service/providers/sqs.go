@@ -52,10 +52,6 @@ type Message struct {
 	MessageID string `json:"message_id"`
 	UserID    string `json:"user_id"`
 	Message   string `json:"message"`
-	Timestamp string `json:"timestamp"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Phone     string `json:"phone"`
 }
 
 func (p *SQSProvider) ReceiveMessages(ctx context.Context, maxMessages int32, waitTimeSeconds int32) ([]SQSMessage, error) {

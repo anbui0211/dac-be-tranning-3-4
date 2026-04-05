@@ -10,11 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"pub-service/handlers"
+	"pub-service/pkg/handlers"
 	"pub-service/providers"
 
 	"github.com/gin-gonic/gin"
-	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -43,7 +42,7 @@ func main() {
 		}
 	}
 
-	batchHandler := handlers.NewBatchHandler(s3Provider, sqsProvider, workerCount)
+	handler := handlers.NewHandler(s3Provider, sqsProvider, workerCount)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
@@ -64,7 +63,7 @@ func main() {
 
 		log.Printf("Processing batch for file: %s", request.CSVFile)
 
-		if err := batchHandler.ProcessBatch(ctx, request.CSVFile); err != nil {
+		if err := handler.ProcessBatch(ctx, request.CSVFile); err != nil {
 			log.Printf("Error processing batch: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -83,43 +82,6 @@ func main() {
 
 		c.JSON(http.StatusOK, gin.H{"files": files})
 	})
-
-	batchInterval := os.Getenv("BATCH_INTERVAL")
-	if batchInterval == "" {
-		batchInterval = "5m"
-	}
-
-	cronScheduler := cron.New(cron.WithSeconds())
-
-	var cronID cron.EntryID
-	cronID, err = cronScheduler.AddFunc("0 */5 * * * *", func() {
-		log.Println("Cron job triggered: processing latest CSV file")
-
-		files, err := s3Provider.ListFiles(ctx)
-		if err != nil {
-			log.Printf("Error listing files for cron: %v", err)
-			return
-		}
-
-		if len(files) == 0 {
-			log.Println("No files found in S3")
-			return
-		}
-
-		latestFile := files[len(files)-1]
-		log.Printf("Processing latest file: %s", latestFile)
-
-		if err := batchHandler.ProcessBatch(ctx, latestFile); err != nil {
-			log.Printf("Error processing batch in cron: %v", err)
-		}
-	})
-
-	if err != nil {
-		log.Printf("Failed to schedule cron job: %v", err)
-	} else {
-		log.Printf("Cron job scheduled with ID: %d", cronID)
-		cronScheduler.Start()
-	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -151,6 +113,5 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	cronScheduler.Stop()
 	log.Println("Server exited")
 }
