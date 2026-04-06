@@ -10,7 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"pub-service/pkg/db"
 	"pub-service/pkg/handlers"
+	"pub-service/pkg/repository"
 	"pub-service/pkg/services"
 	"pub-service/providers"
 
@@ -32,7 +34,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize SQS provider: %v", err)
 	}
-	log.Println("Providers initialized (S3, SQS)")
+
+	mysqlDB, err := db.NewMySQLDB(ctx)
+	if err != nil {
+		log.Fatalf("Failed to initialize MySQL DB: %v", err)
+	}
+
+	scheduleRepo := repository.NewMessageScheduleRepository(mysqlDB)
+
+	log.Println("Providers and repository initialized (S3, SQS, MySQL)")
 
 	workerCount := 20
 	if wc := os.Getenv("SQS_WORKER_COUNT"); wc != "" {
@@ -42,7 +52,7 @@ func main() {
 		}
 	}
 
-	service := services.NewService(s3Provider, sqsProvider, workerCount)
+	service := services.NewService(s3Provider, sqsProvider, scheduleRepo, workerCount)
 
 	if os.Getenv("CLEANUP_ON_START") == "true" {
 		log.Println("Cleanup on start enabled, cleaning up...")

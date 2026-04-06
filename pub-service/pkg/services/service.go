@@ -11,9 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"pub-service/pkg/repository"
 	"pub-service/providers"
-
-	"github.com/google/uuid"
 )
 
 type Service interface {
@@ -23,111 +22,102 @@ type Service interface {
 }
 
 type ServiceImpl struct {
-	s3Provider  *providers.S3Provider
-	sqsProvider *providers.SQSProvider
-	workerCount int
+	s3Provider   *providers.S3Provider
+	sqsProvider  *providers.SQSProvider
+	scheduleRepo repository.MessageScheduleRepository
+	workerCount  int
 }
 
-func NewService(s3Provider *providers.S3Provider, sqsProvider *providers.SQSProvider, workerCount int) Service {
+func NewService(s3Provider *providers.S3Provider, sqsProvider *providers.SQSProvider, scheduleRepo repository.MessageScheduleRepository, workerCount int) Service {
 	return &ServiceImpl{
-		s3Provider:  s3Provider,
-		sqsProvider: sqsProvider,
-		workerCount: workerCount,
+		s3Provider:   s3Provider,
+		sqsProvider:  sqsProvider,
+		scheduleRepo: scheduleRepo,
+		workerCount:  workerCount,
 	}
 }
 
 func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
-	csvKey := "segment_01"
-	log.Printf("Starting batch processing for file: %s", csvKey)
+	log.Printf("Starting batch processing for message schedules")
 
-	startTime := time.Now()
-	totalRows := 0
-	totalMessages := 0
-	errorCount := 0
-
-	result, err := s.s3Provider.DownloadFileStream(ctx, csvKey)
+	schedules, err := s.scheduleRepo.GetAllWithContents(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to download file from S3: %w", err)
-	}
-	defer result.Body.Close()
-
-	reader := csv.NewReader(result.Body)
-
-	_, err = reader.Read()
-	if err != nil {
-		return fmt.Errorf("failed to read CSV headers: %w", err)
+		return fmt.Errorf("failed to get message schedules: %w", err)
 	}
 
-	rowChannel := make(chan []string, 1000)
 	messageChannel := make(chan *providers.Message, 100)
-	messageCount := make(chan int, s.workerCount)
+	messageCount := make(chan int, 1)
 	batchErrorCount := make(chan int, 1)
 
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go s.batchWorker(ctx, messageChannel, messageCount, batchErrorCount, &wg)
 
-	for i := 0; i < s.workerCount; i++ {
-		wg.Add(1)
-		go s.rowWorker(ctx, rowChannel, messageChannel, &wg)
-	}
+	startTime := time.Now()
+	msgCounter := 1
+	totalRows := 0
+	errorCount := 0
 
-	batchWG := sync.WaitGroup{}
-	batchWG.Add(1)
-	go s.batchWorker(ctx, messageChannel, messageCount, batchErrorCount, &batchWG)
-
-	for {
-		row, err := reader.Read()
-		if err == io.EOF {
-			break
+	for _, schedule := range schedules {
+		if schedule.Content == nil {
+			errorCount++
+			continue
 		}
+
+		result, err := s.s3Provider.DownloadFileStream(ctx, schedule.Segment)
+		if err != nil {
+			errorCount++
+			continue
+		}
+		defer result.Body.Close()
+
+		reader := csv.NewReader(result.Body)
+
+		_, err = reader.Read()
 		if err != nil {
 			errorCount++
 			continue
 		}
 
-		if len(row) < 1 {
-			continue
+		for {
+			row, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				errorCount++
+				continue
+			}
+
+			if len(row) < 1 {
+				continue
+			}
+
+			messageID := fmt.Sprintf("msg_%02d", msgCounter)
+			msg := &providers.Message{
+				MessageID: messageID,
+				UserID:    row[0],
+				Message:   schedule.Content.Content,
+			}
+
+			messageChannel <- msg
+			msgCounter++
+			totalRows++
 		}
-
-		rowChannel <- row
-		totalRows++
 	}
-
-	close(rowChannel)
-	wg.Wait()
 
 	close(messageChannel)
+	wg.Wait()
 
-	for count := range messageCount {
-		totalMessages += count
-	}
-
-	close(batchErrorCount)
+	totalMessages := <-messageCount
 	totalBatchErrors := <-batchErrorCount
-
-	batchWG.Wait()
 
 	duration := time.Since(startTime)
 	totalErrors := errorCount + totalBatchErrors
-	log.Printf("Batch processing completed - Rows: %d, Messages: %d, Errors: %d (read: %d, batch: %d), Duration: %v",
-		totalRows, totalMessages, totalErrors, errorCount, totalBatchErrors, duration)
+	log.Printf("Batch processing completed - Schedules: %d, Rows: %d, Messages: %d, Errors: %d (download: %d, batch: %d), Duration: %v",
+		len(schedules), totalRows, totalMessages, totalErrors, errorCount, totalBatchErrors, duration)
 
 	return nil
-}
-
-func (s *ServiceImpl) rowWorker(ctx context.Context, rowChannel <-chan []string, messageChannel chan<- *providers.Message, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for row := range rowChannel {
-		messageID := uuid.New().String()
-
-		msg := &providers.Message{
-			MessageID: messageID,
-			UserID:    row[0],
-			Message:   row[0],
-		}
-
-		messageChannel <- msg
-	}
 }
 
 func (s *ServiceImpl) batchWorker(ctx context.Context, messageChannel <-chan *providers.Message, messageCount chan<- int, batchErrorCount chan<- int, wg *sync.WaitGroup) {

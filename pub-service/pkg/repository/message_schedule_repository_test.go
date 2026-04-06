@@ -25,7 +25,7 @@ func TestMessageScheduleRepository_GetAllWithContents_Success(t *testing.T) {
 			ID:           "s001",
 			ContentID:    "c001",
 			Segment:      "new_users",
-			TimeSchedule: "09:00",
+			TimeSchedule: time.Date(2024, 4, 7, 9, 0, 0, 0, time.UTC),
 			Content: &model.Content{
 				ID:       "c001",
 				Content:  "Welcome message",
@@ -36,7 +36,7 @@ func TestMessageScheduleRepository_GetAllWithContents_Success(t *testing.T) {
 			ID:           "s002",
 			ContentID:    "c002",
 			Segment:      "premium_users",
-			TimeSchedule: "10:00",
+			TimeSchedule: time.Date(2024, 4, 7, 10, 0, 0, 0, time.UTC),
 			Content: &model.Content{
 				ID:       "c002",
 				Content:  "Promotional offer",
@@ -58,7 +58,7 @@ func TestMessageScheduleRepository_GetByIDWithContent_Success(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "new_users",
-		TimeSchedule: "09:00",
+		TimeSchedule: time.Date(2024, 4, 7, 9, 0, 0, 0, time.UTC),
 		Content: &model.Content{
 			ID:       "c001",
 			Content:  "Welcome message",
@@ -77,13 +77,14 @@ func TestMessageScheduleRepository_Create_Success(t *testing.T) {
 	schedule := &model.MessageSchedule{
 		ContentID:    "c001",
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 	}
 
 	assert.NotNil(t, schedule)
 	assert.Equal(t, "c001", schedule.ContentID)
 	assert.Equal(t, "test_segment", schedule.Segment)
-	assert.Equal(t, "18:00", schedule.TimeSchedule)
+	expectedTime := time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC)
+	assert.Equal(t, expectedTime, schedule.TimeSchedule)
 }
 
 func TestMessageScheduleRepository_CreateWithContent_Success(t *testing.T) {
@@ -95,14 +96,15 @@ func TestMessageScheduleRepository_CreateWithContent_Success(t *testing.T) {
 	schedule := &model.MessageSchedule{
 		Content:      &content,
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 	}
 
 	assert.NotNil(t, schedule)
 	assert.NotNil(t, schedule.Content)
 	assert.Equal(t, "Test content", schedule.Content.Content)
 	assert.Equal(t, "test_segment", schedule.Segment)
-	assert.Equal(t, "18:00", schedule.TimeSchedule)
+	expectedTime := time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC)
+	assert.Equal(t, expectedTime, schedule.TimeSchedule)
 }
 
 func TestMessageScheduleRepository_Update_Success(t *testing.T) {
@@ -110,13 +112,14 @@ func TestMessageScheduleRepository_Update_Success(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "updated_segment",
-		TimeSchedule: "19:00",
+		TimeSchedule: time.Date(2024, 4, 7, 19, 0, 0, 0, time.UTC),
 	}
 
 	assert.NotNil(t, schedule)
 	assert.Equal(t, "s001", schedule.ID)
 	assert.Equal(t, "updated_segment", schedule.Segment)
-	assert.Equal(t, "19:00", schedule.TimeSchedule)
+	expectedTime := time.Date(2024, 4, 7, 19, 0, 0, 0, time.UTC)
+	assert.Equal(t, expectedTime, schedule.TimeSchedule)
 }
 
 func TestMessageScheduleRepository_Delete_Success(t *testing.T) {
@@ -124,7 +127,7 @@ func TestMessageScheduleRepository_Delete_Success(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 	}
 
 	assert.Equal(t, "s001", schedule.ID)
@@ -143,7 +146,7 @@ func TestMessageScheduleRepository_TransactionFlow(t *testing.T) {
 		ContentID:    "c003",
 		Content:      &content,
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 	}
 
 	assert.NotEmpty(t, content.ID)
@@ -163,7 +166,7 @@ func TestMessageScheduleRepository_RelationshipLoading(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "new_users",
-		TimeSchedule: "09:00",
+		TimeSchedule: time.Date(2024, 4, 7, 9, 0, 0, 0, time.UTC),
 		Content:      &content,
 	}
 
@@ -180,7 +183,7 @@ func TestMessageScheduleRepository_PointerFields(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 		Content:      nilContent,
 	}
 
@@ -197,7 +200,7 @@ func TestMessageScheduleRepository_PointerFields(t *testing.T) {
 		ID:           "s002",
 		ContentID:    "c001",
 		Segment:      "test_segment",
-		TimeSchedule: "18:00",
+		TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 		Content:      content,
 	}
 
@@ -218,7 +221,7 @@ func TestMessageScheduleRepository_ErrorHandling(t *testing.T) {
 			schedule: &model.MessageSchedule{
 				ContentID:    "c001",
 				Segment:      "test_segment",
-				TimeSchedule: "18:00",
+				TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 			},
 			expectErr: false,
 		},
@@ -230,7 +233,7 @@ func TestMessageScheduleRepository_ErrorHandling(t *testing.T) {
 					ImageURL: "https://example.com/test.jpg",
 				},
 				Segment:      "test_segment",
-				TimeSchedule: "18:00",
+				TimeSchedule: time.Date(2024, 4, 7, 18, 0, 0, 0, time.UTC),
 			},
 			expectErr: false,
 		},
@@ -255,7 +258,7 @@ func TestMessageScheduleRepository_ModelFields(t *testing.T) {
 		ID:           "s001",
 		ContentID:    "c001",
 		Segment:      "new_users",
-		TimeSchedule: "09:00",
+		TimeSchedule: time.Date(2024, 4, 7, 9, 0, 0, 0, time.UTC),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -263,7 +266,8 @@ func TestMessageScheduleRepository_ModelFields(t *testing.T) {
 	assert.Equal(t, "s001", schedule.ID)
 	assert.Equal(t, "c001", schedule.ContentID)
 	assert.Equal(t, "new_users", schedule.Segment)
-	assert.Equal(t, "09:00", schedule.TimeSchedule)
+	expectedTime := time.Date(2024, 4, 7, 9, 0, 0, 0, time.UTC)
+	assert.Equal(t, expectedTime, schedule.TimeSchedule)
 	assert.False(t, schedule.CreatedAt.IsZero())
 	assert.False(t, schedule.UpdatedAt.IsZero())
 }
