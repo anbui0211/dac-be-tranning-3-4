@@ -13,6 +13,7 @@ type Content struct {
 type MessageSchedule struct {
 	ID           string    `gorm:"column:id;primaryKey;type:varchar(36)"`
 	ContentID    string    `gorm:"column:content_id;type:varchar(36)"`
+	Content      *Content  `gorm:"foreignKey:ContentID"`
 	Segment      string    `gorm:"column:segment;type:varchar(100)"`
 	TimeSchedule string    `gorm:"column:time_schedule;type:varchar(50)"`
 	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime"`
