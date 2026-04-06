@@ -180,3 +180,16 @@ func (p *SQSProvider) GetClient() *sqs.Client {
 func (p *SQSProvider) GetQueueURL() string {
 	return p.queueURL
 }
+
+func (p *SQSProvider) PurgeQueue(ctx context.Context) error {
+	input := &sqs.PurgeQueueInput{
+		QueueUrl: aws.String(p.queueURL),
+	}
+
+	_, err := p.client.PurgeQueue(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to purge queue: %w", err)
+	}
+
+	return nil
+}

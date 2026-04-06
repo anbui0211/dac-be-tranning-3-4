@@ -106,6 +106,52 @@ func (p *S3Provider) GetBucket() string {
 	return p.bucket
 }
 
+func (p *S3Provider) DeleteAllObjects(ctx context.Context) error {
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(p.bucket),
+	}
+
+	var deletedCount int
+
+	for {
+		result, err := p.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return fmt.Errorf("failed to list objects: %w", err)
+		}
+
+		if len(result.Contents) == 0 {
+			break
+		}
+
+		for _, obj := range result.Contents {
+			_, err := p.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(p.bucket),
+				Key:    obj.Key,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to delete object %s: %w", *obj.Key, err)
+			}
+			deletedCount++
+		}
+
+		if *result.IsTruncated {
+			input.ContinuationToken = result.NextContinuationToken
+		} else {
+			break
+		}
+	}
+
+	return nil
+}
+
+func (p *S3Provider) EmptyBucket(ctx context.Context) error {
+	err := p.DeleteAllObjects(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *S3Provider) UploadFile(ctx context.Context, key string, data []byte) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(p.bucket),

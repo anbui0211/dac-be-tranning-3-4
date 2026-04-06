@@ -46,6 +46,14 @@ func main() {
 	service := services.NewService(s3Provider, sqsProvider, workerCount)
 	log.Println("Service initialized")
 
+	if os.Getenv("CLEANUP_ON_START") == "true" {
+		log.Println("Cleanup on start enabled, cleaning up...")
+		if err := service.CleanupAndReset(ctx); err != nil {
+			log.Fatalf("Failed to cleanup and reset: %v", err)
+		}
+		log.Println("Cleanup and reset completed")
+	}
+
 	handler := handlers.NewHandler(service)
 
 	gin.SetMode(gin.ReleaseMode)

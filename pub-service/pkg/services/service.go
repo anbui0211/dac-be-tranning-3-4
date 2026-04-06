@@ -19,6 +19,7 @@ import (
 type Service interface {
 	ProcessBatch(ctx context.Context) error
 	UploadAssets(ctx context.Context) (map[string]string, error)
+	CleanupAndReset(ctx context.Context) error
 }
 
 type ServiceImpl struct {
@@ -85,7 +86,7 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 			continue
 		}
 
-		if len(row) < 5 {
+		if len(row) < 1 {
 			log.Printf("Skipping invalid row: %v", row)
 			continue
 		}
@@ -124,7 +125,7 @@ func (s *ServiceImpl) rowWorker(ctx context.Context, rowChannel <-chan []string,
 		msg := &providers.Message{
 			MessageID: messageID,
 			UserID:    row[0],
-			Message:   row[4],
+			Message:   row[0],
 		}
 
 		messageChannel <- msg
@@ -201,4 +202,73 @@ func (s *ServiceImpl) UploadAssets(ctx context.Context) (map[string]string, erro
 	log.Printf("Asset upload completed: %d succeeded, %d failed", successCount, failCount)
 
 	return results, nil
+}
+
+func (s *ServiceImpl) CleanupAndReset(ctx context.Context) error {
+	log.Println("Starting cleanup and reset...")
+
+	log.Println("Purging SQS queue...")
+	if err := s.sqsProvider.PurgeQueue(ctx); err != nil {
+		return fmt.Errorf("failed to purge SQS queue: %w", err)
+	}
+	log.Println("SQS queue purged successfully")
+
+	log.Println("Deleting all objects from S3 bucket...")
+	if err := s.s3Provider.EmptyBucket(ctx); err != nil {
+		return fmt.Errorf("failed to empty S3 bucket: %w", err)
+	}
+	log.Println("S3 bucket emptied successfully")
+
+	assetsDir := "assets"
+	if err := os.MkdirAll(assetsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create assets directory: %w", err)
+	}
+	log.Println("Assets directory ready")
+
+	csvFiles := []string{"segment_01", "segment_02"}
+	for _, fileName := range csvFiles {
+		filePath := filepath.Join(assetsDir, fileName+".csv")
+
+		file, err := os.Create(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to create CSV file %s: %w", fileName, err)
+		}
+
+		writer := csv.NewWriter(file)
+		defer writer.Flush()
+
+		if err := writer.Write([]string{"User"}); err != nil {
+			file.Close()
+			return fmt.Errorf("failed to write header to %s: %w", fileName, err)
+		}
+
+		for i := 1; i <= 10; i++ {
+			userID := fmt.Sprintf("user_%02d", i)
+			if err := writer.Write([]string{userID}); err != nil {
+				file.Close()
+				return fmt.Errorf("failed to write row to %s: %w", fileName, err)
+			}
+		}
+
+		file.Close()
+		log.Printf("Generated CSV file: %s", filePath)
+	}
+
+	log.Println("Uploading CSV files to S3...")
+	for _, fileName := range csvFiles {
+		filePath := filepath.Join(assetsDir, fileName+".csv")
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read CSV file %s: %w", fileName, err)
+		}
+
+		s3Key := fileName
+		if err := s.s3Provider.UploadFile(ctx, s3Key, data); err != nil {
+			return fmt.Errorf("failed to upload %s to S3: %w", fileName, err)
+		}
+		log.Printf("Uploaded %s to S3 as %s", filePath, s3Key)
+	}
+
+	log.Println("Cleanup and reset completed successfully")
+	return nil
 }
