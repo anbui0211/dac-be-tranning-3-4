@@ -51,12 +51,8 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
-	router.GET("/health", handler.HealthHandler)
 	router.GET("/batch", handler.ProcessBatchHandler)
-	router.GET("/files", handler.ListFilesHandler)
-	router.GET("/upload", handler.UploadFileHandler)
-	router.POST("/upload-multiple", handler.UploadMultipleHandler)
-	router.POST("/upload-all", handler.UploadAllHandler)
+	router.POST("/upload-assets", handler.UploadAssetsHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {

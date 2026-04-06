@@ -98,24 +98,6 @@ func (p *S3Provider) DownloadFileStream(ctx context.Context, key string) (*s3.Ge
 	return result, nil
 }
 
-func (p *S3Provider) ListFiles(ctx context.Context) ([]string, error) {
-	input := &s3.ListObjectsV2Input{
-		Bucket: aws.String(p.bucket),
-	}
-
-	result, err := p.client.ListObjectsV2(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list objects from S3: %w", err)
-	}
-
-	files := make([]string, 0, len(result.Contents))
-	for _, obj := range result.Contents {
-		files = append(files, *obj.Key)
-	}
-
-	return files, nil
-}
-
 func (p *S3Provider) GetClient() *s3.Client {
 	return p.client
 }

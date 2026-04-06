@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	model "pub-service/pkg/model"
 	"pub-service/providers"
 
 	"github.com/google/uuid"
@@ -19,10 +18,7 @@ import (
 
 type Service interface {
 	ProcessBatch(ctx context.Context) error
-	UploadFile(ctx context.Context, fileName string) error
-	ListFiles(ctx context.Context) ([]string, error)
-	UploadMultiple(ctx context.Context, fileNames []string, concurrency int) (*model.UploadResponse, error)
-	UploadAll(ctx context.Context, pattern string, concurrency int) (*model.UploadResponse, error)
+	UploadAssets(ctx context.Context) (map[string]string, error)
 }
 
 type ServiceImpl struct {
@@ -119,25 +115,6 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 	return nil
 }
 
-func (s *ServiceImpl) UploadFile(ctx context.Context, fileName string) error {
-	log.Printf("Uploading file: %s", fileName)
-
-	data, err := os.ReadFile(fmt.Sprintf("assets/%s", fileName))
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-
-	if err := s.s3Provider.UploadFile(ctx, fileName, data); err != nil {
-		return fmt.Errorf("failed to upload to S3: %w", err)
-	}
-
-	return nil
-}
-
-func (s *ServiceImpl) ListFiles(ctx context.Context) ([]string, error) {
-	return s.s3Provider.ListFiles(ctx)
-}
-
 func (s *ServiceImpl) rowWorker(ctx context.Context, rowChannel <-chan []string, messageChannel chan<- *providers.Message, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -184,128 +161,44 @@ func (s *ServiceImpl) batchWorker(ctx context.Context, messageChannel <-chan *pr
 	close(messageCount)
 }
 
-func (s *ServiceImpl) UploadMultiple(ctx context.Context, fileNames []string, concurrency int) (*model.UploadResponse, error) {
-	startTime := time.Now()
-
-	if concurrency <= 0 {
-		concurrency = 5
-	}
-	if len(fileNames) == 0 {
-		return nil, fmt.Errorf("no files specified")
-	}
-
-	fileChannel := make(chan string, len(fileNames))
-	resultChannel := make(chan model.UploadResult, len(fileNames))
-
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go s.uploadWorker(ctx, fileChannel, resultChannel, &wg)
-	}
-
-	for _, fileName := range fileNames {
-		fileChannel <- fileName
-	}
-	close(fileChannel)
-
-	wg.Wait()
-	close(resultChannel)
-
-	results := make([]model.UploadResult, 0, len(fileNames))
-	uploaded := 0
-	failed := 0
-
-	for result := range resultChannel {
-		results = append(results, result)
-		if result.Status == "success" {
-			uploaded++
-		} else {
-			failed++
-		}
-	}
-
-	duration := time.Since(startTime)
-	response := &model.UploadResponse{
-		Status:     "completed",
-		TotalFiles: len(fileNames),
-		Uploaded:   uploaded,
-		Failed:     failed,
-		Results:    results,
-		Duration:   duration.String(),
-	}
-
-	return response, nil
-}
-
-func (s *ServiceImpl) UploadAll(ctx context.Context, pattern string, concurrency int) (*model.UploadResponse, error) {
-	startTime := time.Now()
-
-	if concurrency <= 0 {
-		concurrency = 5
-	}
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	fileNames, err := s.listFilesInAssets(pattern)
+func (s *ServiceImpl) UploadAssets(ctx context.Context) (map[string]string, error) {
+	assetsDir := "assets"
+	files, err := os.ReadDir(assetsDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files: %w", err)
+		return nil, fmt.Errorf("failed to read assets directory: %w", err)
 	}
 
-	if len(fileNames) == 0 {
-		return &model.UploadResponse{
-			Status:     "completed",
-			TotalFiles: 0,
-			Uploaded:   0,
-			Failed:     0,
-			Results:    []model.UploadResult{},
-			Duration:   time.Since(startTime).String(),
-		}, nil
-	}
+	results := make(map[string]string)
+	successCount := 0
+	failCount := 0
 
-	return s.UploadMultiple(ctx, fileNames, concurrency)
-}
-
-func (s *ServiceImpl) listFilesInAssets(pattern string) ([]string, error) {
-	files, err := filepath.Glob(fmt.Sprintf("assets/%s", pattern))
-	if err != nil {
-		return nil, err
-	}
-
-	fileNames := make([]string, 0, len(files))
 	for _, file := range files {
-		fileName := filepath.Base(file)
-		fileNames = append(fileNames, fileName)
-	}
-
-	return fileNames, nil
-}
-
-func (s *ServiceImpl) uploadWorker(ctx context.Context, fileChannel <-chan string, resultChannel chan<- model.UploadResult, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for fileName := range fileChannel {
-		result := model.UploadResult{
-			File: fileName,
+		if file.IsDir() {
+			continue
 		}
 
-		data, err := os.ReadFile(fmt.Sprintf("assets/%s", fileName))
+		fileName := file.Name()
+		filePath := filepath.Join(assetsDir, fileName)
+
+		data, err := os.ReadFile(filePath)
 		if err != nil {
-			result.Status = "failed"
-			result.Error = err.Error()
-			resultChannel <- result
+			log.Printf("Error reading file %s: %v", fileName, err)
+			failCount++
 			continue
 		}
 
 		if err := s.s3Provider.UploadFile(ctx, fileName, data); err != nil {
-			result.Status = "failed"
-			result.Error = err.Error()
-			resultChannel <- result
+			log.Printf("Error uploading file %s: %v", fileName, err)
+			failCount++
 			continue
 		}
 
-		result.Status = "success"
-		result.Key = fileName
-		resultChannel <- result
+		results[fileName] = "success"
+		successCount++
+		log.Printf("Uploaded: %s", fileName)
 	}
+
+	log.Printf("Asset upload completed: %d succeeded, %d failed", successCount, failCount)
+
+	return results, nil
 }
