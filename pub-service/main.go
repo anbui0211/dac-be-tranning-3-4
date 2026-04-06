@@ -27,13 +27,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize S3 provider: %v", err)
 	}
-	log.Println("S3 provider initialized")
 
 	sqsProvider, err := providers.NewSQSProvider(ctx)
 	if err != nil {
 		log.Fatalf("Failed to initialize SQS provider: %v", err)
 	}
-	log.Println("SQS provider initialized")
+	log.Println("Providers initialized (S3, SQS)")
 
 	workerCount := 20
 	if wc := os.Getenv("SQS_WORKER_COUNT"); wc != "" {
@@ -44,7 +43,6 @@ func main() {
 	}
 
 	service := services.NewService(s3Provider, sqsProvider, workerCount)
-	log.Println("Service initialized")
 
 	if os.Getenv("CLEANUP_ON_START") == "true" {
 		log.Println("Cleanup on start enabled, cleaning up...")

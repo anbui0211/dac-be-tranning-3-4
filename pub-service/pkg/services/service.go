@@ -53,16 +53,15 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 
 	reader := csv.NewReader(result.Body)
 
-	headers, err := reader.Read()
+	_, err = reader.Read()
 	if err != nil {
 		return fmt.Errorf("failed to read CSV headers: %w", err)
 	}
 
-	log.Printf("CSV Headers: %v", headers)
-
 	rowChannel := make(chan []string, 1000)
 	messageChannel := make(chan *providers.Message, 100)
 	messageCount := make(chan int, s.workerCount)
+	batchErrorCount := make(chan int, 1)
 
 	var wg sync.WaitGroup
 
@@ -73,7 +72,7 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 
 	batchWG := sync.WaitGroup{}
 	batchWG.Add(1)
-	go s.batchWorker(ctx, messageChannel, messageCount, &batchWG)
+	go s.batchWorker(ctx, messageChannel, messageCount, batchErrorCount, &batchWG)
 
 	for {
 		row, err := reader.Read()
@@ -82,12 +81,10 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 		}
 		if err != nil {
 			errorCount++
-			log.Printf("Error reading CSV row: %v", err)
 			continue
 		}
 
 		if len(row) < 1 {
-			log.Printf("Skipping invalid row: %v", row)
 			continue
 		}
 
@@ -104,14 +101,15 @@ func (s *ServiceImpl) ProcessBatch(ctx context.Context) error {
 		totalMessages += count
 	}
 
+	close(batchErrorCount)
+	totalBatchErrors := <-batchErrorCount
+
 	batchWG.Wait()
 
 	duration := time.Since(startTime)
-	log.Printf("Batch processing completed")
-	log.Printf("Total rows: %d", totalRows)
-	log.Printf("Total messages sent: %d", totalMessages)
-	log.Printf("Errors: %d", errorCount)
-	log.Printf("Duration: %v", duration)
+	totalErrors := errorCount + totalBatchErrors
+	log.Printf("Batch processing completed - Rows: %d, Messages: %d, Errors: %d (read: %d, batch: %d), Duration: %v",
+		totalRows, totalMessages, totalErrors, errorCount, totalBatchErrors, duration)
 
 	return nil
 }
@@ -132,18 +130,19 @@ func (s *ServiceImpl) rowWorker(ctx context.Context, rowChannel <-chan []string,
 	}
 }
 
-func (s *ServiceImpl) batchWorker(ctx context.Context, messageChannel <-chan *providers.Message, messageCount chan<- int, wg *sync.WaitGroup) {
+func (s *ServiceImpl) batchWorker(ctx context.Context, messageChannel <-chan *providers.Message, messageCount chan<- int, batchErrorCount chan<- int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	batchSize := 10
 	batch := make([]*providers.Message, 0, batchSize)
+	errorCount := 0
 
 	for msg := range messageChannel {
 		batch = append(batch, msg)
 
 		if len(batch) >= batchSize {
 			if err := s.sqsProvider.BatchSendMessage(ctx, batch); err != nil {
-				log.Printf("Error sending batch: %v", err)
+				errorCount++
 			} else {
 				messageCount <- len(batch)
 			}
@@ -153,13 +152,14 @@ func (s *ServiceImpl) batchWorker(ctx context.Context, messageChannel <-chan *pr
 
 	if len(batch) > 0 {
 		if err := s.sqsProvider.BatchSendMessage(ctx, batch); err != nil {
-			log.Printf("Error sending final batch: %v", err)
+			errorCount++
 		} else {
 			messageCount <- len(batch)
 		}
 	}
 
 	close(messageCount)
+	batchErrorCount <- errorCount
 }
 
 func (s *ServiceImpl) UploadAssets(ctx context.Context) (map[string]string, error) {
@@ -183,23 +183,24 @@ func (s *ServiceImpl) UploadAssets(ctx context.Context) (map[string]string, erro
 
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			log.Printf("Error reading file %s: %v", fileName, err)
 			failCount++
 			continue
 		}
 
 		if err := s.s3Provider.UploadFile(ctx, fileName, data); err != nil {
-			log.Printf("Error uploading file %s: %v", fileName, err)
 			failCount++
 			continue
 		}
 
 		results[fileName] = "success"
 		successCount++
-		log.Printf("Uploaded: %s", fileName)
 	}
 
-	log.Printf("Asset upload completed: %d succeeded, %d failed", successCount, failCount)
+	if failCount > 0 {
+		log.Printf("Asset upload completed: %d succeeded, %d failed", successCount, failCount)
+	} else {
+		log.Printf("Asset upload completed: %d files uploaded successfully", successCount)
+	}
 
 	return results, nil
 }
@@ -207,23 +208,18 @@ func (s *ServiceImpl) UploadAssets(ctx context.Context) (map[string]string, erro
 func (s *ServiceImpl) CleanupAndReset(ctx context.Context) error {
 	log.Println("Starting cleanup and reset...")
 
-	log.Println("Purging SQS queue...")
 	if err := s.sqsProvider.PurgeQueue(ctx); err != nil {
 		return fmt.Errorf("failed to purge SQS queue: %w", err)
 	}
-	log.Println("SQS queue purged successfully")
 
-	log.Println("Deleting all objects from S3 bucket...")
 	if err := s.s3Provider.EmptyBucket(ctx); err != nil {
 		return fmt.Errorf("failed to empty S3 bucket: %w", err)
 	}
-	log.Println("S3 bucket emptied successfully")
 
 	assetsDir := "assets"
 	if err := os.MkdirAll(assetsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create assets directory: %w", err)
 	}
-	log.Println("Assets directory ready")
 
 	csvFiles := []string{"segment_01", "segment_02"}
 	for _, fileName := range csvFiles {
@@ -251,10 +247,8 @@ func (s *ServiceImpl) CleanupAndReset(ctx context.Context) error {
 		}
 
 		file.Close()
-		log.Printf("Generated CSV file: %s", filePath)
 	}
 
-	log.Println("Uploading CSV files to S3...")
 	for _, fileName := range csvFiles {
 		filePath := filepath.Join(assetsDir, fileName+".csv")
 		data, err := os.ReadFile(filePath)
@@ -266,9 +260,8 @@ func (s *ServiceImpl) CleanupAndReset(ctx context.Context) error {
 		if err := s.s3Provider.UploadFile(ctx, s3Key, data); err != nil {
 			return fmt.Errorf("failed to upload %s to S3: %w", fileName, err)
 		}
-		log.Printf("Uploaded %s to S3 as %s", filePath, s3Key)
 	}
 
-	log.Println("Cleanup and reset completed successfully")
+	log.Printf("Cleanup and reset completed - Generated and uploaded %d CSV files to S3", len(csvFiles))
 	return nil
 }

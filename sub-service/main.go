@@ -29,7 +29,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize SQS provider: %v", err)
 	}
-	log.Println("SQS provider initialized")
 
 	redisProvider, err := providers.NewRedisProvider(ctx)
 	if err != nil {
@@ -37,7 +36,7 @@ func main() {
 	}
 
 	defer redisProvider.Close()
-	log.Println("Redis provider initialized")
+	log.Println("Providers initialized (SQS, Redis)")
 
 	workerCount := 50
 	if wc := os.Getenv("SQS_WORKER_COUNT"); wc != "" {
@@ -59,10 +58,8 @@ func main() {
 	shutdown := make(chan struct{})
 
 	shutdownWorkers := func() {
-		log.Println("Shutting down workers...")
 		close(shutdown)
 		wg.Wait()
-		log.Println("All workers stopped")
 	}
 
 	for i := 0; i < workerCount; i++ {
@@ -91,17 +88,20 @@ func main() {
 	go func() {
 		maxMessages := int32(10)
 		waitTimeSeconds := int32(20)
+		sqsErrorCount := 0
 
 		for {
 			select {
 			case <-shutdown:
-				log.Println("Stopping SQS receiver...")
 				close(messageChannel)
 				return
 			default:
 				messages, err := sqsProvider.ReceiveMessages(ctx, maxMessages, waitTimeSeconds)
 				if err != nil {
-					log.Printf("Error receiving messages: %v", err)
+					sqsErrorCount++
+					if sqsErrorCount%10 == 0 {
+						log.Printf("Error receiving messages (total errors: %d): %v", sqsErrorCount, err)
+					}
 					time.Sleep(1 * time.Second)
 					continue
 				}
@@ -179,22 +179,22 @@ func messageWorker(
 ) {
 	defer wg.Done()
 
-	log.Printf("Worker %d started", workerID)
-
 	for {
 		select {
 		case <-shutdown:
-			log.Printf("Worker %d shutting down", workerID)
 			return
 		case msg, ok := <-messageChannel:
 			if !ok {
-				log.Printf("Worker %d channel closed", workerID)
 				return
 			}
 
 			if msg.ParsedMessage == nil {
 				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: received message with nil parsed content", workerID)
+				messageID := "unknown"
+				if msg.MessageId != nil {
+					messageID = *msg.MessageId
+				}
+				log.Printf("Worker %d: received message with nil parsed content (messageID: %s)", workerID, messageID)
 				sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
 				continue
 			}
@@ -204,31 +204,27 @@ func messageWorker(
 			isDuplicate, err := redisProvider.CheckDuplicate(ctx, message.MessageID, message.UserID)
 			if err != nil {
 				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error checking duplicate for user %s: %v", workerID, message.UserID, err)
+				log.Printf("Worker %d: error checking duplicate (user: %s): %v", workerID, message.UserID, err)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 
 			if isDuplicate {
 				atomic.AddInt64(duplicateCount, 1)
-				log.Printf("Worker %d: duplicate message for user %s, skipping", workerID, message.UserID)
 				redisProvider.MarkTechnicalProcessed(ctx, message.MessageID)
 				sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
 				continue
 			}
 
-			log.Printf("Worker %d: processing user %s", workerID, message.UserID)
-			log.Printf("Worker %d: message: %s", workerID, message.Message)
-
 			if err := redisProvider.MarkProcessed(ctx, message.MessageID, message.UserID); err != nil {
 				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error marking processed for user %s: %v", workerID, message.UserID, err)
+				log.Printf("Worker %d: error marking processed (user: %s): %v", workerID, message.UserID, err)
 				continue
 			}
 
 			if err := sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle); err != nil {
 				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error deleting message for user %s: %v", workerID, message.UserID, err)
+				log.Printf("Worker %d: error deleting message (user: %s): %v", workerID, message.UserID, err)
 				continue
 			}
 
