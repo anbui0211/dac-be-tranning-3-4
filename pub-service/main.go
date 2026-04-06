@@ -55,6 +55,8 @@ func main() {
 	router.GET("/batch", handler.ProcessBatchHandler)
 	router.GET("/files", handler.ListFilesHandler)
 	router.GET("/upload", handler.UploadFileHandler)
+	router.POST("/upload-multiple", handler.UploadMultipleHandler)
+	router.POST("/upload-all", handler.UploadAllHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -14,6 +14,8 @@ type Handler interface {
 	UploadFileHandler(c *gin.Context)
 	ProcessBatchHandler(c *gin.Context)
 	ListFilesHandler(c *gin.Context)
+	UploadMultipleHandler(c *gin.Context)
+	UploadAllHandler(c *gin.Context)
 }
 
 type HandlerImpl struct {
@@ -65,4 +67,46 @@ func (h *HandlerImpl) ListFilesHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"files": files})
+}
+
+func (h *HandlerImpl) UploadMultipleHandler(c *gin.Context) {
+	var request struct {
+		Files       []string `json:"files" binding:"required"`
+		Concurrency int      `json:"concurrency"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	response, err := h.service.UploadMultiple(c.Request.Context(), request.Files, request.Concurrency)
+	if err != nil {
+		log.Printf("Error uploading multiple files: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *HandlerImpl) UploadAllHandler(c *gin.Context) {
+	var request struct {
+		Pattern     string `json:"pattern"`
+		Concurrency int    `json:"concurrency"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	response, err := h.service.UploadAll(c.Request.Context(), request.Pattern, request.Concurrency)
+	if err != nil {
+		log.Printf("Error uploading all files: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
 }
