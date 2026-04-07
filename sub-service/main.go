@@ -4,13 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/signal"
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"sub-service/providers"
@@ -35,8 +32,13 @@ func main() {
 		log.Fatalf("Failed to initialize Redis provider: %v", err)
 	}
 
+	lineProvider, err := providers.NewLINEProvider()
+	if err != nil {
+		log.Fatalf("Failed to initialize LINE provider: %v", err)
+	}
+
 	defer redisProvider.Close()
-	log.Println("Providers initialized (SQS, Redis)")
+	log.Println("Providers initialized (SQS, Redis, LINE)")
 
 	workerCount := 50
 	if wc := os.Getenv("SQS_WORKER_COUNT"); wc != "" {
@@ -47,41 +49,39 @@ func main() {
 	}
 	log.Printf("Starting %d workers", workerCount)
 
+	lockTTL := 5 * time.Minute
+	if lt := os.Getenv("PROCESSING_LOCK_TTL"); lt != "" {
+		if d, err := time.ParseDuration(lt); err == nil {
+			lockTTL = d
+		}
+	}
+	log.Printf("Processing lock TTL: %v", lockTTL)
+
 	var processedCount int64
-	var duplicateCount int64
 	var errorCount int64
+	var lineErrorCount int64
+	var duplicateSkipped int64
 
 	messageChannel := make(chan providers.SQSMessage, 100)
 
 	var wg sync.WaitGroup
 
-	shutdown := make(chan struct{})
-
-	shutdownWorkers := func() {
-		close(shutdown)
-		wg.Wait()
-	}
-
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
-		go messageWorker(ctx, &wg, i, sqsProvider, redisProvider, messageChannel, shutdown, &processedCount, &duplicateCount, &errorCount)
+		go messageWorker(ctx, &wg, i, sqsProvider, redisProvider, lineProvider, messageChannel, &processedCount, &errorCount, &lineErrorCount, &duplicateSkipped, lockTTL)
 	}
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				log.Printf("Metrics - Processed: %d, Duplicates: %d, Errors: %d, Goroutines: %d",
-					atomic.LoadInt64(&processedCount),
-					atomic.LoadInt64(&duplicateCount),
-					atomic.LoadInt64(&errorCount),
-					runtime.NumGoroutine())
-			case <-shutdown:
-				return
-			}
+		for range ticker.C {
+			log.Printf("Metrics - Processed: %d, Errors: %d, LINE Errors: %d, Duplicates: %d, Goroutines: %d",
+				atomic.LoadInt64(&processedCount),
+				atomic.LoadInt64(&errorCount),
+				atomic.LoadInt64(&lineErrorCount),
+				atomic.LoadInt64(&duplicateSkipped),
+				runtime.NumGoroutine())
 		}
 	}()
 
@@ -91,78 +91,53 @@ func main() {
 		sqsErrorCount := 0
 
 		for {
-			select {
-			case <-shutdown:
-				close(messageChannel)
-				return
-			default:
-				messages, err := sqsProvider.ReceiveMessages(ctx, maxMessages, waitTimeSeconds)
-				if err != nil {
-					sqsErrorCount++
-					if sqsErrorCount%10 == 0 {
-						log.Printf("Error receiving messages (total errors: %d): %v", sqsErrorCount, err)
-					}
-					time.Sleep(1 * time.Second)
-					continue
+			messages, err := sqsProvider.ReceiveMessages(ctx, maxMessages, waitTimeSeconds)
+			if err != nil {
+				sqsErrorCount++
+				if sqsErrorCount%10 == 0 {
+					log.Printf("Error receiving messages (total errors: %d): %v", sqsErrorCount, err)
 				}
+				time.Sleep(1 * time.Second)
+				continue
+			}
 
-				if len(messages) == 0 {
-					continue
-				}
+			if len(messages) == 0 {
+				continue
+			}
 
-				for _, msg := range messages {
-					messageChannel <- msg
-				}
+			for _, msg := range messages {
+				messageChannel <- msg
 			}
 		}
 	}()
 
 	gin.SetMode(gin.ReleaseMode)
-	router := gin.Default()
+	r := gin.Default()
 
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":     "ok",
-			"service":    "sub-service",
-			"processed":  atomic.LoadInt64(&processedCount),
-			"duplicates": atomic.LoadInt64(&duplicateCount),
-			"errors":     atomic.LoadInt64(&errorCount),
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"status":  "ok",
+			"service": "sub-service",
+			"metrics": gin.H{
+				"processed":   atomic.LoadInt64(&processedCount),
+				"errors":      atomic.LoadInt64(&errorCount),
+				"line_errors": atomic.LoadInt64(&lineErrorCount),
+				"duplicates":  atomic.LoadInt64(&duplicateSkipped),
+			},
+			"workers":    workerCount,
 			"goroutines": runtime.NumGoroutine(),
 		})
 	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8082"
+		port = "8081"
 	}
 
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: router,
+	log.Printf("Server starting on port %s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Server error: %v", err)
 	}
-
-	go func() {
-		log.Printf("Server starting on port %s", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down server...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
-	}
-
-	shutdownWorkers()
-	log.Println("Server exited")
 }
 
 func messageWorker(
@@ -171,64 +146,86 @@ func messageWorker(
 	workerID int,
 	sqsProvider *providers.SQSProvider,
 	redisProvider *providers.RedisProvider,
+	lineProvider *providers.LINEProvider,
 	messageChannel <-chan providers.SQSMessage,
-	shutdown <-chan struct{},
 	processedCount *int64,
-	duplicateCount *int64,
 	errorCount *int64,
+	lineErrorCount *int64,
+	duplicateSkipped *int64,
+	lockTTL time.Duration,
 ) {
 	defer wg.Done()
 
 	for {
-		select {
-		case <-shutdown:
+		msg, ok := <-messageChannel
+		if !ok {
 			return
-		case msg, ok := <-messageChannel:
-			if !ok {
-				return
-			}
-
-			if msg.ParsedMessage == nil {
-				atomic.AddInt64(errorCount, 1)
-				messageID := "unknown"
-				if msg.MessageId != nil {
-					messageID = *msg.MessageId
-				}
-				log.Printf("Worker %d: received message with nil parsed content (messageID: %s)", workerID, messageID)
-				sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
-				continue
-			}
-
-			message := msg.ParsedMessage
-
-			isDuplicate, err := redisProvider.CheckDuplicate(ctx, message.MessageID, message.UserID)
-			if err != nil {
-				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error checking duplicate (user: %s): %v", workerID, message.UserID, err)
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			if isDuplicate {
-				atomic.AddInt64(duplicateCount, 1)
-				redisProvider.MarkTechnicalProcessed(ctx, message.MessageID)
-				sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
-				continue
-			}
-
-			if err := redisProvider.MarkProcessed(ctx, message.MessageID, message.UserID); err != nil {
-				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error marking processed (user: %s): %v", workerID, message.UserID, err)
-				continue
-			}
-
-			if err := sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle); err != nil {
-				atomic.AddInt64(errorCount, 1)
-				log.Printf("Worker %d: error deleting message (user: %s): %v", workerID, message.UserID, err)
-				continue
-			}
-
-			atomic.AddInt64(processedCount, 1)
 		}
+
+		if msg.ParsedMessage == nil {
+			atomic.AddInt64(errorCount, 1)
+			messageID := "unknown"
+			if msg.MessageId != nil {
+				messageID = *msg.MessageId
+			}
+			log.Printf("Worker %d: received message with nil parsed content (messageID: %s)", workerID, messageID)
+			sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
+			continue
+		}
+
+		message := msg.ParsedMessage
+		messageID := message.MessageID
+
+		isProcessed, err := redisProvider.CheckProcessed(ctx, messageID)
+		if err != nil {
+			atomic.AddInt64(errorCount, 1)
+			log.Printf("Worker %d: error checking processed status (message: %s): %v", workerID, messageID, err)
+			continue
+		}
+		if isProcessed {
+			log.Printf("Worker %d: message %s already processed, skipping", workerID, messageID)
+			sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle)
+			atomic.AddInt64(duplicateSkipped, 1)
+			continue
+		}
+
+		locked, err := redisProvider.AcquireProcessingLock(ctx, messageID, workerID, lockTTL)
+		if err != nil {
+			atomic.AddInt64(errorCount, 1)
+			log.Printf("Worker %d: error acquiring lock (message: %s): %v", workerID, messageID, err)
+			continue
+		}
+		if !locked {
+			log.Printf("Worker %d: message %s already locked by another worker, skipping", workerID, messageID)
+			atomic.AddInt64(duplicateSkipped, 1)
+			continue
+		}
+
+		if err := lineProvider.PushMessage(ctx, message.UserID, message.Message); err != nil {
+			atomic.AddInt64(lineErrorCount, 1)
+			log.Printf("Worker %d: error sending LINE message (message: %s): %v", workerID, messageID, err)
+
+			redisProvider.ReleaseProcessingLock(ctx, messageID)
+
+			continue
+		}
+
+		if err := redisProvider.MarkProcessed(ctx, messageID, message.UserID); err != nil {
+			atomic.AddInt64(errorCount, 1)
+			log.Printf("Worker %d: error marking processed (message: %s): %v", workerID, messageID, err)
+			redisProvider.ReleaseProcessingLock(ctx, messageID)
+			continue
+		}
+
+		redisProvider.ReleaseProcessingLock(ctx, messageID)
+
+		if err := sqsProvider.DeleteMessage(ctx, msg.ReceiptHandle); err != nil {
+			atomic.AddInt64(errorCount, 1)
+			log.Printf("Worker %d: error deleting message from SQS (message: %s): %v", workerID, messageID, err)
+			continue
+		}
+
+		atomic.AddInt64(processedCount, 1)
+		log.Printf("Worker %d: successfully processed message %s", workerID, messageID)
 	}
 }

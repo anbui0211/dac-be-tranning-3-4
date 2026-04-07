@@ -132,9 +132,25 @@ services:
       SQS_QUEUE_URL: http://elasticmq:9324/queue/user-jobs-queue
       SQS_WORKER_COUNT: 50
       REDIS_ADDR: redis:6379
+      LINE_API_ENDPOINT: http://fake-line-server:3000
+      LINE_CHANNEL_ACCESS_TOKEN: mock_token
+      LINE_RETRY_ATTEMPTS: 3
+      LINE_RETRY_DELAY: 1000
+      PROCESSING_LOCK_TTL: 300s
     depends_on:
       - redis
       - elasticmq
+      - fake-line-server
+    networks:
+      - app-network
+
+  fake-line-server:
+    build:
+      context: ./fake-line-server
+      dockerfile: Dockerfile
+    container_name: fake-line-server
+    ports:
+      - "3000:3000"
     networks:
       - app-network
 

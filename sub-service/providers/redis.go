@@ -129,3 +129,36 @@ func (p *RedisProvider) Close() error {
 func (p *RedisProvider) GetClient() *redis.Client {
 	return p.client
 }
+
+func (p *RedisProvider) AcquireProcessingLock(ctx context.Context, messageID string, workerID int, ttl time.Duration) (bool, error) {
+	lockKey := fmt.Sprintf("processing:%s", messageID)
+	lockValue := fmt.Sprintf("%d:%d", workerID, time.Now().Unix())
+
+	acquired, err := p.client.SetNX(ctx, lockKey, lockValue, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	return acquired, nil
+}
+
+func (p *RedisProvider) ReleaseProcessingLock(ctx context.Context, messageID string) error {
+	lockKey := fmt.Sprintf("processing:%s", messageID)
+
+	if err := p.client.Del(ctx, lockKey).Err(); err != nil {
+		return fmt.Errorf("failed to release lock: %w", err)
+	}
+
+	return nil
+}
+
+func (p *RedisProvider) CheckProcessed(ctx context.Context, messageID string) (bool, error) {
+	processedKey := fmt.Sprintf("processed:%s", messageID)
+
+	exists, err := p.client.Exists(ctx, processedKey).Result()
+	if err != nil {
+		return false, fmt.Errorf("failed to check processed status: %w", err)
+	}
+
+	return exists > 0, nil
+}
