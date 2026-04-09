@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +62,7 @@ func main() {
 	var errorCount int64
 	var lineErrorCount int64
 	var duplicateSkipped int64
+	var panicCount int64
 
 	messageChannel := make(chan providers.SQSMessage, 100)
 
@@ -68,7 +70,7 @@ func main() {
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
-		go messageWorker(ctx, &wg, i, sqsProvider, redisProvider, lineProvider, messageChannel, &processedCount, &errorCount, &lineErrorCount, &duplicateSkipped, lockTTL)
+		go startSupervisedWorker(ctx, &wg, i, sqsProvider, redisProvider, lineProvider, messageChannel, &processedCount, &errorCount, &lineErrorCount, &duplicateSkipped, &panicCount, lockTTL)
 	}
 
 	go func() {
@@ -76,11 +78,12 @@ func main() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Printf("Metrics - Processed: %d, Errors: %d, LINE Errors: %d, Duplicates: %d, Goroutines: %d",
+			log.Printf("Metrics - Processed: %d, Errors: %d, LINE Errors: %d, Duplicates: %d, Panics: %d, Goroutines: %d",
 				atomic.LoadInt64(&processedCount),
 				atomic.LoadInt64(&errorCount),
 				atomic.LoadInt64(&lineErrorCount),
 				atomic.LoadInt64(&duplicateSkipped),
+				atomic.LoadInt64(&panicCount),
 				runtime.NumGoroutine())
 		}
 	}()
@@ -123,6 +126,7 @@ func main() {
 				"errors":      atomic.LoadInt64(&errorCount),
 				"line_errors": atomic.LoadInt64(&lineErrorCount),
 				"duplicates":  atomic.LoadInt64(&duplicateSkipped),
+				"panics":      atomic.LoadInt64(&panicCount),
 			},
 			"workers":    workerCount,
 			"goroutines": runtime.NumGoroutine(),
@@ -140,7 +144,7 @@ func main() {
 	}
 }
 
-func messageWorker(
+func startSupervisedWorker(
 	ctx context.Context,
 	wg *sync.WaitGroup,
 	workerID int,
@@ -152,10 +156,52 @@ func messageWorker(
 	errorCount *int64,
 	lineErrorCount *int64,
 	duplicateSkipped *int64,
+	panicCount *int64,
 	lockTTL time.Duration,
 ) {
 	defer wg.Done()
 
+	log.Printf("Worker %d: starting supervised worker", workerID)
+
+	for {
+		if ctx.Err() != nil {
+			log.Printf("Worker %d: graceful shutdown", workerID)
+			return
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					atomic.AddInt64(panicCount, 1)
+					log.Printf("Worker %d: panic recovered - %v\n%s", workerID, r, debug.Stack())
+				}
+			}()
+			messageWorker(ctx, workerID, sqsProvider, redisProvider, lineProvider, messageChannel, processedCount, errorCount, lineErrorCount, duplicateSkipped, lockTTL)
+		}()
+
+		select {
+		case <-time.After(1 * time.Second):
+			log.Printf("Worker %d: restarting after backoff", workerID)
+		case <-ctx.Done():
+			log.Printf("Worker %d: shutdown during backoff", workerID)
+			return
+		}
+	}
+}
+
+func messageWorker(
+	ctx context.Context,
+	workerID int,
+	sqsProvider *providers.SQSProvider,
+	redisProvider *providers.RedisProvider,
+	lineProvider *providers.LINEProvider,
+	messageChannel <-chan providers.SQSMessage,
+	processedCount *int64,
+	errorCount *int64,
+	lineErrorCount *int64,
+	duplicateSkipped *int64,
+	lockTTL time.Duration,
+) {
 	for {
 		msg, ok := <-messageChannel
 		if !ok {
